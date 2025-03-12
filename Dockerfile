@@ -1,5 +1,6 @@
-#chatServer cpp env
-FROM ubuntu:22.04 AS builder
+#-------------------构建基础编译镜像
+#server共用的编译环境
+FROM ubuntu:22.04 AS base-image
 
 #设置工作目录
 WORKDIR /app
@@ -92,3 +93,66 @@ RUN wget  https://downloads.mysql.com/archives/get/p/20/file/mysql-connector-c%2
 #更新环境变量
 RUN echo "/usr/lib64" >> /etc/ld.so.conf.d/mysql-connector-cpp.conf && \
     ldconfig
+
+#清理现场
+WORKDIR /
+RUN rm -rf /app
+
+#chatServer的编译
+FROM base-image AS chatserver-builder
+
+WORKDIR /root/code
+
+#传递git仓库最新的commit-id
+ARG COMMIT_SHA
+
+RUN git clone https://github.com/github-newstar/chatServer.git && \
+    cd chatServer && \
+    mkdir build && \
+    cd build && \
+    cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release && \
+    ninja
+
+FROM ubuntu:22.04 AS chatserver-final
+WORKDIR /root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libicu70 \
+    libssl3 \
+    libstdc++6 \
+    libmysqlclient21 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从构建阶段复制必要的库文件
+# Boost库
+COPY --from=builder /usr/lib/libboost_*.so* /usr/lib/
+
+# JsonCpp库
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libjsoncpp* /usr/lib
+
+# gRPC及相关库
+COPY --from=builder /usr/lib/libgrpc*.so* /usr/lib/
+COPY --from=builder /usr/lib/libprotobuf.so* /usr/lib/
+COPY --from=builder /usr/lib/libabsl*.so* /usr/lib/
+COPY --from=builder /usr/lib/libupb*.so* /usr/lib/
+COPY --from=builder /usr/lib/libaddress_sorting.so* /usr/lib/
+COPY --from=builder /usr/lib/libgpr.so* /usr/lib/
+
+# Redis相关库
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libredis* /usr/lib/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libhiredis* /usr/lib/
+COPY --from=builder /usr/lib/libredis++.so* /usr/lib/
+
+# MySQL C++ 连接器
+COPY --from=builder /usr/lib64/libmysqlcppconn*.so* /usr/lib64/
+
+# 拷贝二进制文件
+COPY --from=chatServer-builder /root/code/chatServer/build/chatServer /root/chatServer/chatServer
+COPY --from=chatServer-builder /root/code/chatServer/build/config.ii  /root/chatServer/config.ii
+
+# 更新动态链接器配置
+RUN echo "/usr/lib64" >> /etc/ld.so.conf.d/mysql-connector-cpp.conf && \
+    ldconfig
+
+WORKDIR /root/chatServer
+CMD ["/root/chatServer/chatServer"]
